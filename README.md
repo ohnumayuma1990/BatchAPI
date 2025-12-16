@@ -1,3 +1,5 @@
+# BatchAPI
+バッチAPIを叩いて、結果を取得できる画面
 # React + TypeScript + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
