@@ -33,7 +33,7 @@ type RunRequest = {
   temperature?: number
 }
 
-const defaultModel = 'gpt-4o-mini' // 必要に応じて変更
+const defaultModel = 'gpt-5.2' // 必要に応じて変更
 
 type StoredPromptRow = {
   id: string
