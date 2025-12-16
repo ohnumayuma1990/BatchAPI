@@ -80,23 +80,34 @@ function App() {
   const hasSelection = selectedIds.length > 0
   const allSelected = rows.length > 0 && selectedIds.length === rows.length
 
+  // 追加：一覧取得用の関数（同期も兼ねる）
+  const fetchBatchList = async () => {
+    setIsLoading(true)
+
+    try {
+      // 以前は /api/batch/status (詳細不明) や /api/batch/list を使っていたが、
+      // ここで一括同期エンドポイントを呼ぶ
+      const res = await fetch('/api/batch/sync', {
+        method: 'POST',
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.rows)) {
+        setRows(data.rows);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
   // Worker + Durable Object を使う場合は、起動時にサーバ側の一覧を読み込む
   useEffect(() => {
     if (useFakeApi) return
-    
 
-    ;(async () => {
-      try {
-        const res = await fetch('/api/batch/list')
-        if (!res.ok) return
-        const data = (await res.json()) as { rows?: PromptRow[] }
-        if (Array.isArray(data.rows)) {
-          setRows(data.rows)
-        }
-      } catch (e) {
-        console.error(e)
-      }
-    })()
+    // 初回ロード時も同期を行う
+    fetchBatchList();
   }, [])
 
   const handleAddPrompt = () => {
@@ -224,23 +235,7 @@ function App() {
     }
   }
 
-  // 追加：一覧取得用の関数
-  const fetchBatchList = async () => {
-    setIsLoading(true)
 
-    try {
-      const res = await fetch('/api/batch/status');
-      if (!res.ok) return;
-      const data = await res.json();
-      if (Array.isArray(data.rows)) {
-        setRows(data.rows);
-      }
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsLoading(false)
-    }
-  }
 
   return (
     <div className="page">
@@ -373,16 +368,7 @@ function App() {
                       </td>
                       <td className="mono">{row.batchId ?? '-'}</td>
                       <td>
-                        {row.result ? (
-                          <details>
-                            <summary>結果を表示</summary>
-                            <pre className="result-text">{row.result}</pre>
-                          </details>
-                        ) : row.error ? (
-                          <span className="error-text">{row.error}</span>
-                        ) : (
-                          <span className="muted">未取得</span>
-                        )}
+                        <ResultCell result={row.result} error={row.error} />
                       </td>
                     </tr>
                   ))}
@@ -395,5 +381,85 @@ function App() {
     </div>
   )
 }
+
+/**
+ * 結果表示用のセルコンポーネント
+ * JSON文字列の場合はパースして回答テキストのみを抽出し、コピー機能を提供する
+ */
+function ResultCell({ result, error }: { result?: string, error?: string }) {
+  const [parsed, setParsed] = useState<{ text: string, isJson: boolean } | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  useMemo(() => {
+    if (!result) return
+
+    try {
+      const json = JSON.parse(result)
+      // Responses API: body.output[0].content[0].text
+      // ChatCompletion: body.choices[0].message.content (if wrapped similarly)
+      let text = ''
+
+      if (json?.body?.output?.[0]?.content?.[0]?.type === 'output_text') {
+        text = json.body.output[0].content[0].text
+      }
+      else if (json?.body?.choices?.[0]?.message?.content) {
+        text = json.body.choices[0].message.content
+      }
+      else {
+        // Fallback: struct not matched, use raw
+        text = result
+      }
+
+      // JSONとしてパースできたが、構造が期待通りかは別。
+      // ここでは元のJSON文字列と抽出テキスト(もしくは元のまま)を持つ
+      // 抽出できた場合(つまり元の文字列と違う場合)は isJson = true 扱いとする
+      setParsed({ text, isJson: text !== result })
+    } catch (e) {
+      setParsed({ text: result, isJson: false })
+    }
+  }, [result])
+
+  const handleCopy = async () => {
+    if (!parsed?.text) return
+    try {
+      await navigator.clipboard.writeText(parsed.text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch (e) {
+      console.error('Copy failed', e)
+    }
+  }
+
+  if (error) {
+    return <span className="error-text">{error}</span>
+  }
+
+  if (!result || !parsed) {
+    return <span className="muted">未取得</span>
+  }
+
+  return (
+    <details>
+      <summary>結果を表示</summary>
+      <div className="result-content">
+        {parsed.isJson && (
+          <div className="result-actions">
+            <button className="btn outline sm" onClick={handleCopy}>
+              {copied ? 'コピーしました！' : 'AI回答のみコピー'}
+            </button>
+          </div>
+        )}
+        <pre className="result-text">{parsed.isJson ? parsed.text : result}</pre>
+        {parsed.isJson && (
+          <details className="raw-json-details">
+            <summary>Raw JSON</summary>
+            <pre className="result-text sm">{result}</pre>
+          </details>
+        )}
+      </div>
+    </details>
+  )
+}
+
 
 export default App

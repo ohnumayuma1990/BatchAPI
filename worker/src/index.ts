@@ -64,6 +64,11 @@ export default {
       return getBatchResult(fileId, env)
     }
 
+    if (request.method === 'POST' && path === '/api/batch/sync') {
+      return syncBatchStatus(env)
+    }
+
+
     if (request.method === 'GET' && path === '/api/batch/list') {
       return getBatchList(env)
     }
@@ -83,7 +88,7 @@ export default {
 
 // Durable Object: バッチ実行したプロンプト一覧を永続化する
 export class BatchStore {
-  constructor(private state: DurableObjectState) {}
+  constructor(private state: DurableObjectState) { }
 
   async fetch(request: any): Promise<any> {
     const url = new URL(request.url)
@@ -140,6 +145,35 @@ export class BatchStore {
         ((await this.state.storage.get<StoredPromptRow[]>('rows')) as StoredPromptRow[] | undefined) ??
         []
       return jsonResponse({ rows })
+    }
+
+    if (request.method === 'POST' && url.pathname.endsWith('/batches/remove')) {
+      const body = (await request.json()) as { ids: string[] }
+      const current =
+        ((await this.state.storage.get<StoredPromptRow[]>('rows')) as
+          | StoredPromptRow[]
+          | undefined) ?? []
+
+      const next = current.filter((row) => !body.ids.includes(row.id))
+      await this.state.storage.put('rows', next)
+      return new Response(null, { status: 204 })
+    }
+
+    if (request.method === 'POST' && url.pathname.endsWith('/batches/update')) {
+      const body = (await request.json()) as { rows: StoredPromptRow[] }
+      const current =
+        ((await this.state.storage.get<StoredPromptRow[]>('rows')) as
+          | StoredPromptRow[]
+          | undefined) ?? []
+
+      // IDでマッチするものを更新
+      const next = current.map((row) => {
+        const update = body.rows.find((u) => u.id === row.id)
+        return update ? update : row
+      })
+
+      await this.state.storage.put('rows', next)
+      return new Response(null, { status: 204 })
     }
 
     return new Response('not found', { status: 404 })
@@ -281,7 +315,6 @@ async function addPrompts(request: Request, env: Env): Promise<any> {
 async function deleteBatches(request: Request, env: Env): Promise<Response> {
   const id = env.BATCH_STORE.idFromName('global')
   const stub = env.BATCH_STORE.get(id)
-  const body = await request.text() //もしくはjson()にしてbodyをパース
   const json = await request.json()
 
   const resp = await stub.fetch('https://batch-store/batches/remove', {
@@ -290,6 +323,134 @@ async function deleteBatches(request: Request, env: Env): Promise<Response> {
     headers: { 'Content-Type': 'application/json' },
   })
   return resp as any
+}
+
+// バッチステータスの同期処理
+async function syncBatchStatus(env: Env): Promise<Response> {
+  const id = env.BATCH_STORE.idFromName('global')
+  const stub = env.BATCH_STORE.get(id)
+
+  // 1. 全データを取得
+  const listResp = await stub.fetch('https://batch-store/batches/list')
+  if (!listResp.ok) return listResp as any
+  const { rows } = (await listResp.json()) as { rows: StoredPromptRow[] }
+
+  // 2. 完了/失敗していないバッチID（かつバッチIDが存在するもの）を特定
+  const activeBatchIds = Array.from(new Set(
+    rows
+      .filter(r => r.batchId && r.status !== 'completed' && r.status !== 'failed' && r.status !== 'not_submitted')
+      .map(r => r.batchId!)
+  ));
+
+  const updates: StoredPromptRow[] = [];
+  const baseUrl = env.OPENAI_BASE_URL?.replace(/\/$/, '') ?? 'https://api.openai.com/v1'
+
+  // 3. 各バッチについてOpenAIへ問い合わせ
+  for (const batchId of activeBatchIds) {
+    try {
+      const statusResp = await fetch(`${baseUrl}/batches/${batchId}`, {
+        method: 'GET',
+        headers: authHeader(env),
+      });
+      if (!statusResp.ok) continue;
+
+      const batchData = await statusResp.json() as any; // 詳細はOpenAI型定義に準拠
+      // status: validating, failed, in_progress, finalizing, completed, expired, cancelling, cancelled
+
+      const openAiStatus = batchData.status;
+
+      // 行のステータスマッピング
+      let newRowStatus: StoredPromptRow['status'] | undefined;
+
+      if (openAiStatus === 'completed') {
+        newRowStatus = 'completed';
+      } else if (openAiStatus === 'failed' || openAiStatus === 'expired' || openAiStatus === 'cancelled') {
+        newRowStatus = 'failed';
+      } else {
+        // まだ実行中 ('in_progress', 'finalizing' etc)
+        newRowStatus = 'running';
+      }
+
+      // 完了していたら結果も取得
+      let resultMap: Record<string, any> = {};
+      if (openAiStatus === 'completed' && batchData.output_file_id) {
+        const fileResp = await fetch(`${baseUrl}/files/${batchData.output_file_id}/content`, {
+          method: 'GET',
+          headers: authHeader(env),
+        });
+        if (fileResp.ok) {
+          const fileText = await fileResp.text();
+          // JSONLをパースして map化 (custom_id -> response)
+          const lines = fileText.trim().split('\n');
+          lines.forEach(line => {
+            try {
+              const json = JSON.parse(line);
+              // OpenAI Batch Output format: { id: "batch_req_...", custom_id: "...", response: { ... } }
+              if (json.custom_id) {
+                // response body の content を取得したい
+                // ChatCompletionの場合: response.body.choices[0].message.content
+                const content = json.response?.body?.choices?.[0]?.message?.content ?? JSON.stringify(json.response);
+                resultMap[json.custom_id] = content;
+              }
+            } catch (e) {
+              // ignore
+            }
+          });
+        }
+      }
+
+      // 対象の行を更新リストに追加
+      rows.filter(r => r.batchId === batchId).forEach(row => {
+        let updated = false;
+        const clone = { ...row };
+
+        if (newRowStatus && clone.status !== newRowStatus) {
+          clone.status = newRowStatus;
+          updated = true;
+        }
+
+        if (newRowStatus === 'completed' && resultMap[row.id]) {
+          clone.result = resultMap[row.id];
+          updated = true;
+        }
+
+        if (newRowStatus === 'failed' && !clone.error) {
+          // エラー詳細があれば入れたいところだが、とりあえずBatch全体のstatus等
+          clone.error = `Batch status: ${openAiStatus}`;
+          clone.result = undefined; // 念のため
+          updated = true;
+        }
+
+        if (updated) {
+          updates.push(clone);
+        }
+      });
+
+    } catch (e) {
+      console.error(`Failed to sync batch ${batchId}`, e);
+    }
+  }
+
+  // 4. 更新があればDOへ保存
+  if (updates.length > 0) {
+    await stub.fetch('https://batch-store/batches/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows: updates }),
+    });
+
+    // 更新後のリストを返すために、メモリ上のrowsにも反映して返す（あるいは再度fetchしてもよいが）
+    // ここでは簡易的に、最新の状態を再度DOから取らずとも、mergeして返却する
+    const updatedIds = updates.map(u => u.id);
+    const finalRows = rows.map(r => {
+      const u = updates.find(up => up.id === r.id);
+      return u ? u : r;
+    });
+    return jsonResponse({ rows: finalRows });
+  }
+
+  // 更新がなければそのまま返す
+  return jsonResponse({ rows });
 }
 
 function authHeader(env: Env): Record<string, string> {
@@ -302,6 +463,5 @@ function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
     headers: { 'Content-Type': 'application/json' },
-  })
+  }) as any
 }
-

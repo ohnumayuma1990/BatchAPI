@@ -214,6 +214,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
+  line-clamp: 3;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   white-space: pre-wrap;
@@ -282,14 +283,14 @@
   font-size: 0.8rem;
 }
 
-details > summary {
+details>summary {
   cursor: pointer;
   list-style: none;
   color: #4f46e5;
   font-size: 0.82rem;
 }
 
-details > summary::-webkit-details-marker {
+details>summary::-webkit-details-marker {
   display: none;
 }
 
@@ -306,4 +307,28 @@ details > summary::-webkit-details-marker {
   .table-card {
     padding: 1.1rem 1rem;
   }
+}
+
+.result-content {
+  margin-top: 8px;
+}
+
+.result-actions {
+  margin-bottom: 8px;
+}
+
+.raw-json-details {
+  margin-top: 12px;
+  border-top: 1px solid #eee;
+  padding-top: 8px;
+}
+
+.result-text.sm {
+  font-size: 0.8rem;
+  color: #666;
+}
+
+.btn.sm {
+  padding: 4px 8px;
+  font-size: 0.8rem;
 }
