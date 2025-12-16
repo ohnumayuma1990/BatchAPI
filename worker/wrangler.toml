@@ -1,0 +1,32 @@
+name = "responses-batch-worker"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[build]
+# Worker を dev / deploy するときに、先にフロント側をビルドする
+command = "cd .. && npm run build"
+
+[durable_objects]
+bindings = [
+  { name = "BATCH_STORE", class_name = "BatchStore" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BatchStore"]
+
+[vars]
+# wrangler secret put OPENAI_API_KEY
+# wrangler secret put OPENAI_BASE_URL  # 省略可（デフォルトは https://api.openai.com/v1）
+
+[placement]
+mode = "smart"
+
+[observability]
+enabled = true
+
+[assets]
+# Vite のビルド成果物 (../dist) を同一 Worker で配信
+directory = "../dist"
+binding = "ASSETS"
+
